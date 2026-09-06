@@ -5,6 +5,7 @@
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
+const compression = require("compression");
 const session = require("express-session");
 const passport = require("passport");
 const GoogleStrategy = require("passport-google-oauth20").Strategy;
@@ -12,6 +13,19 @@ const GoogleStrategy = require("passport-google-oauth20").Strategy;
 const app = express();
 app.set("trust proxy", 1); // required behind Render's proxy so secure cookies (HTTPS) work correctly
 app.use(cors({ origin: true, credentials: true })); // credentials:true so the session cookie is sent
+
+// Gzip/Brotli-compress responses to speed up page loads — but never the
+// SSE chat stream, since compression buffers chunks and would kill the
+// real-time "typing" effect.
+app.use(
+  compression({
+    filter: (req, res) => {
+      if (res.getHeader("Content-Type") === "text/event-stream") return false;
+      return compression.filter(req, res);
+    },
+  })
+);
+
 app.use(express.json());
 
 // ---------- Sessions & Passport ----------
@@ -128,19 +142,28 @@ app.post("/api/chat", requireAuth, async (req, res) => {
       return res.status(geminiRes.status).json({ error: message });
     }
 
-    // Stream Server-Sent Events straight through to the client
+    // Stream Server-Sent Events straight through to the client.
+    // Written as raw bytes (no TextDecoder) so we're not paying a
+    // decode-then-re-encode cost on every chunk — we never touch the
+    // content, so there's no reason to turn it into a string at all.
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no"); // tells proxies (nginx-style, some PaaS included) not to buffer this
     res.flushHeaders();
 
     const reader = geminiRes.body.getReader();
-    const decoder = new TextDecoder();
 
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-      res.write(decoder.decode(value, { stream: true }));
+      // value is already a Uint8Array — write it straight through
+      const flushed = res.write(value);
+      if (!flushed) {
+        // respect backpressure: wait for the socket's buffer to drain
+        // before pulling the next chunk from Gemini
+        await new Promise((resolve) => res.once("drain", resolve));
+      }
     }
 
     res.end();
@@ -161,7 +184,7 @@ app.listen(PORT, () => {
 
 // --- Setup ---
 // 1. npm init -y
-// 2. npm install express cors dotenv express-session passport passport-google-oauth20
+// 2. npm install express cors compression dotenv express-session passport passport-google-oauth20
 //    (Node 18+ has global fetch built in, so node-fetch isn't needed)
 // 3. Fill in .env: GEMINI_API_KEY, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET,
 //    GOOGLE_CALLBACK_URL, SESSION_SECRET (never commit .env to git)
