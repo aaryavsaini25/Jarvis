@@ -7,7 +7,7 @@ const express = require("express");
 const cors = require("cors");
 const compression = require("compression");
 const session = require('express-session');
-const MemoryStore = require('session-memory-store')(session); 
+const MemoryStore = require('session-memory-store')(session);
 const passport = require("passport");
 const GoogleStrategy = require("passport-google-oauth20").Strategy;
 
@@ -68,8 +68,8 @@ passport.use(
         user = {
           id: profile.id,
           name: profile.displayName,
-          email: profile.emails && profile.emails.length > 0 ? profile.emails[0].value : null, // Fixed safely with brackets
-          photo: profile.photos && profile.photos.length > 0 ? profile.photos[0].value : null, // Fixed safely with brackets
+          email: profile.emails && profile.emails.length > 0 ? profile.emails[0].value : null,
+          photo: profile.photos && profile.photos.length > 0 ? profile.photos[0].value : null,
         };
         users.set(profile.id, user);
       }
@@ -127,7 +127,11 @@ app.post("/api/chat", requireAuth, async (req, res) => {
     return res.status(400).json({ error: "Request body must include a non-empty 'contents' array." });
   }
 
-  const geminiUrl = `https://googleapis.com{MODEL}:streamGenerateContent?key=${API_KEY}&alt=sse`;
+  // FIXED: was missing the "generativelanguage." domain, the
+  // "/v1beta/models/" path, and the $ before {MODEL} (so MODEL was never
+  // actually interpolated) — every request would have failed against the
+  // literal string "https://googleapis.com{MODEL}:...".
+  const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:streamGenerateContent?key=${API_KEY}&alt=sse`;
 
   let retries = 3;
   let delay = 2000; // Start with a 2-second delay
@@ -145,7 +149,7 @@ app.post("/api/chat", requireAuth, async (req, res) => {
         console.warn(`Hit Gemini 429 Rate Limit. Retrying in ${delay}ms...`);
         await new Promise(resolve => setTimeout(resolve, delay));
         retries--;
-        delay *= 2; 
+        delay *= 2;
         continue;
       }
 
@@ -158,7 +162,7 @@ app.post("/api/chat", requireAuth, async (req, res) => {
       res.setHeader("Content-Type", "text/event-stream");
       res.setHeader("Cache-Control", "no-cache");
       res.setHeader("Connection", "keep-alive");
-      res.setHeader("X-Accel-Buffering", "no"); 
+      res.setHeader("X-Accel-Buffering", "no");
       res.flushHeaders();
 
       const reader = geminiRes.body.getReader();
@@ -172,7 +176,7 @@ app.post("/api/chat", requireAuth, async (req, res) => {
         }
       }
 
-      return res.end(); 
+      return res.end();
 
     } catch (err) {
       console.error("Gemini proxy error:", err);
@@ -193,3 +197,13 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
 });
+
+// --- Setup ---
+// 1. npm init -y
+// 2. npm install express cors compression dotenv express-session session-memory-store passport passport-google-oauth20
+//    (Node 18+ has global fetch built in, so node-fetch isn't needed)
+// 3. Fill in .env: GEMINI_API_KEY, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET,
+//    GOOGLE_CALLBACK_URL, SESSION_SECRET (never commit .env to git)
+// 4. In Google Auth Platform > Clients, make sure the redirect URI you
+//    registered matches GOOGLE_CALLBACK_URL exactly.
+// 5. node server.js
