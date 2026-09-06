@@ -1,6 +1,8 @@
 // server.js
 // Backend proxy: holds the Gemini API key server-side and streams the
 // response through to the frontend. The browser never sees the key.
+const compression = require("compression");
+app.use(compression());
 
 require("dotenv").config();
 const express = require("express");
