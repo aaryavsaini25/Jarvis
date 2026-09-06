@@ -18,6 +18,15 @@
     "express": "^5.2.1",
     "express-session": "^1.19.0",
     "passport": "^0.7.0",
-    "passport-google-oauth20": "^2.0.0"
-  }
+    "passport-google-oauth20": "^2.0.0",
+    "session-memory-store": "^0.2.2"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aaryavsaini25/Jarvis.git"
+  },
+  "bugs": {
+    "url": "https://github.com/aaryavsaini25/Jarvis/issues"
+  },
+  "homepage": "https://github.com/aaryavsaini25/Jarvis#readme"
 }

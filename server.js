@@ -1,6 +1,19 @@
 // server.js
 // Backend proxy: holds the Gemini API key server-side and streams the
 // response through to the frontend. The browser never sees the key.
+const session = require('express-session');
+const MemoryStore = require('session-memory-store')(session); // Add this line
+
+app.use(session({
+    secret: 'your-secret-key', // Change this to your actual secret key
+    resave: false,
+    saveUninitialized: false,
+    store: new MemoryStore({
+        checkPeriod: 86400000 // Prunes expired entries every 24h to save RAM
+    }),
+    cookie: { maxAge: 24 * 60 * 60 * 1000 } // 1 day
+}));
+
 
 require("dotenv").config();
 const express = require("express");
