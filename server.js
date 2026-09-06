@@ -68,8 +68,8 @@ passport.use(
         user = {
           id: profile.id,
           name: profile.displayName,
-          email: profile.emails?.[0]?.value, 
-          photo: profile.photos?.[0]?.value,  
+          email: profile.emails && profile.emails[0] ? profile.emails[0].value : null, // Fixed syntax error safely
+          photo: profile.photos && profile.photos[0] ? profile.photos[0].value : null, // Fixed syntax error safely
         };
         users.set(profile.id, user);
       }
@@ -145,7 +145,7 @@ app.post("/api/chat", requireAuth, async (req, res) => {
         console.warn(`Hit Gemini 429 Rate Limit. Retrying in ${delay}ms...`);
         await new Promise(resolve => setTimeout(resolve, delay));
         retries--;
-        delay *= 2; // Double the wait duration for the next retry loop
+        delay *= 2; 
         continue;
       }
 
@@ -172,7 +172,7 @@ app.post("/api/chat", requireAuth, async (req, res) => {
         }
       }
 
-      return res.end(); // End request successfully
+      return res.end(); 
 
     } catch (err) {
       console.error("Gemini proxy error:", err);
@@ -184,7 +184,6 @@ app.post("/api/chat", requireAuth, async (req, res) => {
     }
   }
 
-  // Fallback response if all 3 retry cycles failed to overcome the 429 block
   if (!res.headersSent) {
     res.status(429).json({ error: "Jarvis is currently processing too many requests. Please try again in a few moments." });
   }
