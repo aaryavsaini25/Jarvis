@@ -1,25 +1,13 @@
 // server.js
 // Backend proxy: holds the Gemini API key server-side and streams the
 // response through to the frontend. The browser never sees the key.
-const session = require('express-session');
-const MemoryStore = require('session-memory-store')(session); // Add this line
-
-app.use(session({
-    secret: 'your-secret-key', // Change this to your actual secret key
-    resave: false,
-    saveUninitialized: false,
-    store: new MemoryStore({
-        checkPeriod: 86400000 // Prunes expired entries every 24h to save RAM
-    }),
-    cookie: { maxAge: 24 * 60 * 60 * 1000 } // 1 day
-}));
-
 
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const compression = require("compression");
-const session = require("express-session");
+const session = require('express-session');
+const MemoryStore = require('session-memory-store')(session); 
 const passport = require("passport");
 const GoogleStrategy = require("passport-google-oauth20").Strategy;
 
@@ -45,9 +33,12 @@ app.use(express.json());
 
 app.use(
   session({
-    secret: process.env.SESSION_SECRET,
+    secret: process.env.SESSION_SECRET || 'your-secret-key',
     resave: false,
     saveUninitialized: false,
+    store: new MemoryStore({
+      checkPeriod: 86400000 // Prunes expired entries every 24h to save RAM
+    }),
     cookie: {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production", // requires HTTPS in production
@@ -55,6 +46,7 @@ app.use(
     },
   })
 );
+
 app.use(passport.initialize());
 app.use(passport.session());
 
@@ -194,13 +186,3 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
 });
-
-// --- Setup ---
-// 1. npm init -y
-// 2. npm install express cors compression dotenv express-session passport passport-google-oauth20
-//    (Node 18+ has global fetch built in, so node-fetch isn't needed)
-// 3. Fill in .env: GEMINI_API_KEY, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET,
-//    GOOGLE_CALLBACK_URL, SESSION_SECRET (never commit .env to git)
-// 4. In Google Auth Platform > Clients, make sure the redirect URI you
-//    registered matches GOOGLE_CALLBACK_URL exactly.
-// 5. node server.js
