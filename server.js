@@ -68,8 +68,8 @@ passport.use(
         user = {
           id: profile.id,
           name: profile.displayName,
-          email: profile.emails && profile.emails[0] ? profile.emails[0].value : null, // Fixed syntax error safely
-          photo: profile.photos && profile.photos[0] ? profile.photos[0].value : null, // Fixed syntax error safely
+          email: profile.emails && profile.emails[0] ? profile.emails[0].value : null, // Safely extract first email from array
+          photo: profile.photos && profile.photos[0] ? profile.photos[0].value : null, // Safely extract first photo from array
         };
         users.set(profile.id, user);
       }
