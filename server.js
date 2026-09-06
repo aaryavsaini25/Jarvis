@@ -62,16 +62,14 @@ passport.use(
       callbackURL: process.env.GOOGLE_CALLBACK_URL,
     },
     (accessToken, refreshToken, profile, done) => {
-      // profile.id is Google's permanent, unique user id — use this (not
-      // email) as your account's primary key so one Google account can
-      // never end up mapped to two of your app's accounts.
+      // profile.id is Google's permanent, unique user id
       let user = users.get(profile.id);
       if (!user) {
         user = {
           id: profile.id,
           name: profile.displayName,
-          email: profile.emails?.[0]?.value,
-          photo: profile.photos?.[0]?.value,
+          email: profile.emails?.[0]?.value, 
+          photo: profile.photos?.[0]?.value,  
         };
         users.set(profile.id, user);
       }
@@ -122,9 +120,6 @@ if (!API_KEY) {
   console.error("Missing GEMINI_API_KEY in .env — the server will not be able to reach Gemini.");
 }
 
-// requireAuth here is what actually enforces the login gate the frontend
-// overlay shows — without it, someone could still call this endpoint
-// directly and bypass the overlay entirely.
 app.post("/api/chat", requireAuth, async (req, res) => {
   const { contents } = req.body;
 
@@ -132,53 +127,66 @@ app.post("/api/chat", requireAuth, async (req, res) => {
     return res.status(400).json({ error: "Request body must include a non-empty 'contents' array." });
   }
 
-  const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:streamGenerateContent?key=${API_KEY}&alt=sse`;
+  const geminiUrl = `https://googleapis.com{MODEL}:streamGenerateContent?key=${API_KEY}&alt=sse`;
 
-  try {
-    const geminiRes = await fetch(geminiUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ contents }),
-    });
+  let retries = 3;
+  let delay = 2000; // Start with a 2-second delay
 
-    if (!geminiRes.ok || !geminiRes.body) {
-      const errData = await geminiRes.json().catch(() => null);
-      const message = errData?.error?.message || `HTTP ${geminiRes.status}`;
-      return res.status(geminiRes.status).json({ error: message });
-    }
+  while (retries > 0) {
+    try {
+      const geminiRes = await fetch(geminiUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ contents }),
+      });
 
-    // Stream Server-Sent Events straight through to the client.
-    // Written as raw bytes (no TextDecoder) so we're not paying a
-    // decode-then-re-encode cost on every chunk — we never touch the
-    // content, so there's no reason to turn it into a string at all.
-    res.setHeader("Content-Type", "text/event-stream");
-    res.setHeader("Cache-Control", "no-cache");
-    res.setHeader("Connection", "keep-alive");
-    res.setHeader("X-Accel-Buffering", "no"); // tells proxies (nginx-style, some PaaS included) not to buffer this
-    res.flushHeaders();
+      // Handle 429 Too Many Requests (Rate Limiting) with Exponential Backoff
+      if (geminiRes.status === 429 && retries > 1) {
+        console.warn(`Hit Gemini 429 Rate Limit. Retrying in ${delay}ms...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        retries--;
+        delay *= 2; // Double the wait duration for the next retry loop
+        continue;
+      }
 
-    const reader = geminiRes.body.getReader();
+      if (!geminiRes.ok || !geminiRes.body) {
+        const errData = await geminiRes.json().catch(() => null);
+        const message = errData?.error?.message || `HTTP ${geminiRes.status}`;
+        return res.status(geminiRes.status).json({ error: message });
+      }
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      // value is already a Uint8Array — write it straight through
-      const flushed = res.write(value);
-      if (!flushed) {
-        // respect backpressure: wait for the socket's buffer to drain
-        // before pulling the next chunk from Gemini
-        await new Promise((resolve) => res.once("drain", resolve));
+      res.setHeader("Content-Type", "text/event-stream");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Connection", "keep-alive");
+      res.setHeader("X-Accel-Buffering", "no"); 
+      res.flushHeaders();
+
+      const reader = geminiRes.body.getReader();
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const flushed = res.write(value);
+        if (!flushed) {
+          await new Promise((resolve) => res.once("drain", resolve));
+        }
+      }
+
+      return res.end(); // End request successfully
+
+    } catch (err) {
+      console.error("Gemini proxy error:", err);
+      if (!res.headersSent) {
+        return res.status(500).json({ error: err.message });
+      } else {
+        return res.end();
       }
     }
+  }
 
-    res.end();
-  } catch (err) {
-    console.error("Gemini proxy error:", err);
-    if (!res.headersSent) {
-      res.status(500).json({ error: err.message });
-    } else {
-      res.end();
-    }
+  // Fallback response if all 3 retry cycles failed to overcome the 429 block
+  if (!res.headersSent) {
+    res.status(429).json({ error: "Jarvis is currently processing too many requests. Please try again in a few moments." });
   }
 });
 
