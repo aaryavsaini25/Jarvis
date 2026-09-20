@@ -1,18 +1,22 @@
 // server.js
 // Backend proxy: holds the Gemini API key server-side and streams the
 // response through to the frontend. The browser never sees the key.
+//
+// Vercel-ready: exports the app, serves /public with an absolute path, and
+// uses cookie-based sessions (serverless functions can't keep sessions in
+// memory between requests).
 
 require("dotenv").config();
+const path = require("path");
 const express = require("express");
 const cors = require("cors");
 const compression = require("compression");
-const session = require('express-session');
-const MemoryStore = require('session-memory-store')(session);
+const cookieSession = require("cookie-session");
 const passport = require("passport");
 const GoogleStrategy = require("passport-google-oauth20").Strategy;
 
 const app = express();
-app.set("trust proxy", 1); // required behind Render's proxy so secure cookies (HTTPS) work correctly
+app.set("trust proxy", 1); // required behind Vercel's proxy so secure cookies (HTTPS) work correctly
 app.use(cors({ origin: true, credentials: true })); // credentials:true so the session cookie is sent
 
 // Gzip/Brotli-compress responses to speed up page loads — but never the
@@ -31,28 +35,33 @@ app.use(express.json());
 
 // ---------- Sessions & Passport ----------
 
+// The whole session lives inside a signed cookie, so it works no matter
+// which serverless instance handles the request.
 app.use(
-  session({
-    secret: process.env.SESSION_SECRET || 'your-secret-key',
-    resave: false,
-    saveUninitialized: false,
-    store: new MemoryStore({
-      checkPeriod: 86400000 // Prunes expired entries every 24h to save RAM
-    }),
-    cookie: {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production", // requires HTTPS in production
-      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-    },
+  cookieSession({
+    name: "jarvis_session",
+    keys: [process.env.SESSION_SECRET || "dev-only-secret-change-me"],
+    maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production", // requires HTTPS in production
+    sameSite: "lax", // lax is needed so the cookie survives the redirect back from Google
   })
 );
 
+// passport 0.6+ calls req.session.regenerate/save, which cookie-session
+// doesn't provide. These no-op shims make the two work together.
+app.use((req, res, next) => {
+  if (req.session && !req.session.regenerate) {
+    req.session.regenerate = (cb) => cb();
+  }
+  if (req.session && !req.session.save) {
+    req.session.save = (cb) => cb();
+  }
+  next();
+});
+
 app.use(passport.initialize());
 app.use(passport.session());
-
-// TEMPORARY in-memory user store — swap for a real database (MySQL etc.)
-// before going to production. Keyed by Google's stable user id.
-const users = new Map();
 
 passport.use(
   new GoogleStrategy(
@@ -63,23 +72,22 @@ passport.use(
     },
     (accessToken, refreshToken, profile, done) => {
       // profile.id is Google's permanent, unique user id
-      let user = users.get(profile.id);
-      if (!user) {
-        user = {
-          id: profile.id,
-          name: profile.displayName,
-          email: profile.emails && profile.emails.length > 0 ? profile.emails[0].value : null,
-          photo: profile.photos && profile.photos.length > 0 ? profile.photos[0].value : null,
-        };
-        users.set(profile.id, user);
-      }
+      const user = {
+        id: profile.id,
+        name: profile.displayName,
+        email: profile.emails && profile.emails.length > 0 ? profile.emails[0].value : null,
+        photo: profile.photos && profile.photos.length > 0 ? profile.photos[0].value : null,
+      };
       done(null, user);
     }
   )
 );
 
-passport.serializeUser((user, done) => done(null, user.id));
-passport.deserializeUser((id, done) => done(null, users.get(id) || null));
+// Store the small user object directly in the cookie (no server-side user
+// store needed). Swap for a real database (MySQL etc.) later if you want
+// to save per-user data like chat history.
+passport.serializeUser((user, done) => done(null, user));
+passport.deserializeUser((user, done) => done(null, user));
 
 // ---------- Auth routes ----------
 
@@ -92,7 +100,10 @@ app.get(
 );
 
 app.get("/auth/logout", (req, res) => {
-  req.logout(() => res.redirect("/"));
+  req.logout(() => {
+    req.session = null; // clear the session cookie
+    res.redirect("/");
+  });
 });
 
 // Frontend calls this to check "am I logged in, and as who?"
@@ -111,13 +122,17 @@ function requireAuth(req, res, next) {
 }
 
 // Serve the frontend files (index.html, script.js, css, etc.) from /public
-app.use(express.static("public"));
+app.use(express.static(path.join(__dirname, "public")));
+
+app.get("/", (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "index.html"));
+});
 
 const API_KEY = process.env.GEMINI_API_KEY;
 const MODEL = process.env.GEMINI_MODEL || "gemini-3.6-flash";
 
 if (!API_KEY) {
-  console.error("Missing GEMINI_API_KEY in .env — the server will not be able to reach Gemini.");
+  console.error("Missing GEMINI_API_KEY — the server will not be able to reach Gemini.");
 }
 
 app.post("/api/chat", requireAuth, async (req, res) => {
@@ -127,10 +142,6 @@ app.post("/api/chat", requireAuth, async (req, res) => {
     return res.status(400).json({ error: "Request body must include a non-empty 'contents' array." });
   }
 
-  // FIXED: was missing the "generativelanguage." domain, the
-  // "/v1beta/models/" path, and the $ before {MODEL} (so MODEL was never
-  // actually interpolated) — every request would have failed against the
-  // literal string "https://googleapis.com{MODEL}:...".
   const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:streamGenerateContent?key=${API_KEY}&alt=sse`;
 
   let retries = 3;
@@ -147,7 +158,7 @@ app.post("/api/chat", requireAuth, async (req, res) => {
       // Handle 429 Too Many Requests (Rate Limiting) with Exponential Backoff
       if (geminiRes.status === 429 && retries > 1) {
         console.warn(`Hit Gemini 429 Rate Limit. Retrying in ${delay}ms...`);
-        await new Promise(resolve => setTimeout(resolve, delay));
+        await new Promise((resolve) => setTimeout(resolve, delay));
         retries--;
         delay *= 2;
         continue;
@@ -177,7 +188,6 @@ app.post("/api/chat", requireAuth, async (req, res) => {
       }
 
       return res.end();
-
     } catch (err) {
       console.error("Gemini proxy error:", err);
       if (!res.headersSent) {
@@ -193,17 +203,23 @@ app.post("/api/chat", requireAuth, async (req, res) => {
   }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
-});
+// Vercel imports the app; locally, `node server.js` starts a normal server.
+module.exports = app;
+
+if (require.main === module) {
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+  });
+}
 
 // --- Setup ---
-// 1. npm init -y
-// 2. npm install express cors compression dotenv express-session session-memory-store passport passport-google-oauth20
-//    (Node 18+ has global fetch built in, so node-fetch isn't needed)
-// 3. Fill in .env: GEMINI_API_KEY, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET,
-//    GOOGLE_CALLBACK_URL, SESSION_SECRET (never commit .env to git)
-// 4. In Google Auth Platform > Clients, make sure the redirect URI you
-//    registered matches GOOGLE_CALLBACK_URL exactly.
-// 5. node server.js
+// 1. npm install express cors compression dotenv cookie-session passport passport-google-oauth20
+//    (express-session and session-memory-store are no longer needed;
+//     Node 18+ has global fetch built in, so node-fetch isn't needed)
+// 2. Env vars (locally in .env, on Vercel under Settings > Environment Variables):
+//    GEMINI_API_KEY, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET,
+//    GOOGLE_CALLBACK_URL, SESSION_SECRET  (never commit .env to git)
+// 3. GOOGLE_CALLBACK_URL on Vercel must be your Vercel URL + /auth/google/callback,
+//    and that exact URL must be registered as a redirect URI in Google Auth Platform > Clients.
+// 4. Local run: node server.js
